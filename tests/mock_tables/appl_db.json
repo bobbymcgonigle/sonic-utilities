@@ -42,6 +42,7 @@
         "admin_status": "up",
         "adv_speeds": "50000,10000",
         "interface_type": "CR4",
+	"flap_count" : "1",
         "adv_interface_types": "CR4,CR2",
         "autoneg": "on",
         "link_training": "on"
@@ -55,6 +56,7 @@
         "oper_status": "up",
         "pfc_asym": "off",
         "mtu": "9100",
+	"flap_count" : "3",
         "admin_status": "up"
     },
     "PORT_TABLE:Ethernet36": {

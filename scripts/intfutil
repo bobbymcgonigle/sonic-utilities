@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import ast
 import os
 import re
 import sys
@@ -44,7 +45,11 @@ PORT_ADMIN_STATUS = "admin_status"
 PORT_SPEED = "speed"
 PORT_MTU_STATUS = "mtu"
 PORT_FEC = "fec"
+PORT_FLAPS = "flap_count"
 PORT_DESCRIPTION = "description"
+PORT_XCVR_MEDIUM = "medium"
+PORT_XCVR_MANUFACTURER = "manufacturer"
+PORT_XCVR_MODEL = "model"
 PORT_OPTICS_TYPE = "type"
 PORT_PFC_ASYM_STATUS = "pfc_asym"
 PORT_AUTONEG = 'autoneg'
@@ -215,6 +220,68 @@ def port_oper_speed_get_raw(db, intf_name):
     if speed is None or speed == "N/A" or oper_status != "up":
         speed = db.get(db.APPL_DB, PORT_STATUS_TABLE_PREFIX + intf_name, PORT_SPEED)
     return speed
+
+def port_xcvr_medium_get(db, full_table_id):
+    """
+    Get medium type of the transceiver
+    """
+    # SFF8472 (SFP+)
+    status_entry = db.get(db.STATE_DB, full_table_id, "SFP+CableTechnology")
+    if status_entry is not None:
+        if status_entry == "Passive Cable":
+            return "Copper"
+        return "Optic"
+
+    # CMIS & SFF8638 (QSFP28) & SFF8436
+    eth_compl = '10/40G Ethernet Compliance Code'
+    eth_ext_compl = 'Extended Specification Compliance'
+    status_entry = db.get(db.STATE_DB, full_table_id, "specification_compliance")
+
+    if status_entry is not None:
+        # CMIS
+        if status_entry == "passive_copper_media_interface" or status_entry == "active_cable_media_interface":
+            return "Copper"
+
+        # SFF8636 (QSFP28) & SFF8436 (QSFP+)
+        try:
+            status_entry_dict = ast.literal_eval(status_entry)
+        except:
+            status_entry_dict = status_entry
+        if eth_compl not in status_entry_dict and eth_ext_compl not in status_entry_dict:
+            return "N/A"
+        if eth_ext_compl in status_entry_dict and status_entry_dict[eth_compl] == "40GBASE-CR4":
+            return "Copper"
+        if eth_ext_compl in status_entry_dict:
+            if "CR" in status_entry_dict[eth_ext_compl] or \
+                    "ACC" in status_entry_dict[eth_ext_compl] or \
+                    "Copper" in status_entry_dict[eth_ext_compl]:
+                return "Copper"
+        return "Optic"
+    return "N/A"
+
+def port_xcvr_info_get(db, intf_name, status_type):
+    """
+    Get information about the transceiver
+    """
+    full_table_id = PORT_TRANSCEIVER_TABLE_PREFIX + intf_name
+    if status_type == PORT_XCVR_MEDIUM:
+        return port_xcvr_medium_get(db, full_table_id)
+    elif status_type == PORT_OPTICS_TYPE:
+        optics_type = db.get(db.STATE_DB, full_table_id, status_type)
+        if optics_type is None:
+            if is_rj45_port(intf_name):
+                return OPTICS_TYPE_RJ45
+            elif db.get(db.APPL_DB, PORT_STATUS_TABLE_PREFIX + intf_name, multi_asic.PORT_ROLE) == multi_asic.DPU_CONNECT_PORT:
+                return TYPE_DPC
+            else:
+                return "N/A"
+        return optics_type.split()[0]
+    elif status_type == PORT_XCVR_MANUFACTURER:
+        status_entry = db.get(db.STATE_DB, full_table_id, PORT_XCVR_MANUFACTURER)
+        return status_entry.strip() if status_entry else "N/A"
+    elif status_type == PORT_XCVR_MODEL:
+        status_entry = db.get(db.STATE_DB, full_table_id, PORT_XCVR_MODEL)
+        return status_entry.strip() if status_entry else "N/A"
 
 def port_optics_get(db, intf_name, type):
     """
@@ -416,7 +483,7 @@ def appl_db_sub_intf_status_get(appl_db, config_db, front_panel_ports_list, port
 
 # ========================== interface-status logic ==========================
 
-header_stat = ['Interface', 'Lanes', 'Speed', 'MTU', 'FEC', 'Alias', 'Vlan', 'Oper', 'Admin', 'Type', 'Asym PFC']
+header_stat = ['Interface', 'Lanes', 'Speed', 'MTU', 'FEC', 'Alias', 'Vlan', 'Oper', 'Admin', 'Medium', 'Type', 'Vendor', 'Model', 'Asym PFC', 'Flaps']
 header_stat_sub_intf = ['Sub port interface', 'Speed', 'MTU', 'Vlan', 'Admin', 'Type']
 
 
@@ -487,8 +554,12 @@ class IntfStatus(object):
                                 config_db_vlan_port_keys_get(self.combined_int_to_vlan_po_dict, self.front_panel_ports_list, key),
                                 appl_db_port_status_get(self.db, key, PORT_OPER_STATUS),
                                 appl_db_port_status_get(self.db, key, PORT_ADMIN_STATUS),
-                                port_optics_get(self.db, key, PORT_OPTICS_TYPE),
-                                appl_db_port_status_get(self.db, key, PORT_PFC_ASYM_STATUS)))
+                                port_xcvr_info_get(self.db, key, PORT_XCVR_MEDIUM),
+                                port_xcvr_info_get(self.db, key, PORT_OPTICS_TYPE),
+                                port_xcvr_info_get(self.db, key, PORT_XCVR_MANUFACTURER),
+                                port_xcvr_info_get(self.db, key, PORT_XCVR_MODEL),
+                                appl_db_port_status_get(self.db, key, PORT_PFC_ASYM_STATUS),
+                                appl_db_port_status_get(self.db, key, PORT_FLAPS)))
 
             for po, value in self.portchannel_speed_dict.items():
                 if po:
@@ -504,8 +575,12 @@ class IntfStatus(object):
                                 appl_db_portchannel_status_get(self.db, self.config_db, po, "vlan", self.portchannel_speed_dict, self.combined_int_to_vlan_po_dict),
                                 appl_db_portchannel_status_get(self.db, self.config_db, po, PORT_OPER_STATUS, self.portchannel_speed_dict),
                                 appl_db_portchannel_status_get(self.db, self.config_db, po, PORT_ADMIN_STATUS, self.portchannel_speed_dict),
-                                appl_db_portchannel_status_get(self.db, self.config_db, po, PORT_OPTICS_TYPE, self.portchannel_speed_dict),
-                                appl_db_portchannel_status_get(self.db, self.config_db, po, PORT_PFC_ASYM_STATUS, self.portchannel_speed_dict)))
+                                port_xcvr_info_get(self.db, po, PORT_XCVR_MEDIUM),
+                                port_xcvr_info_get(self.db, po, PORT_OPTICS_TYPE),
+                                port_xcvr_info_get(self.db, po, PORT_XCVR_MANUFACTURER),
+                                port_xcvr_info_get(self.db, po, PORT_XCVR_MODEL),
+                                appl_db_portchannel_status_get(self.db, self.config_db, po, PORT_PFC_ASYM_STATUS, self.portchannel_speed_dict),
+                                appl_db_portchannel_status_get(self.db, self.config_db, po, PORT_FLAPS, self.portchannel_speed_dict)))
         else:
             for key in self.appl_db_sub_intf_keys:
                 sub_intf = re.split(':', key, maxsplit=1)[-1].strip()
